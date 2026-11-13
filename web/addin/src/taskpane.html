@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Signature</title>
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font: 14px/1.45 "Segoe UI", system-ui, sans-serif; margin: 0; padding: 16px; }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      p { margin: 0 0 12px; opacity: .8; }
+      .options { display: flex; flex-direction: column; gap: 8px; }
+      button { font: inherit; text-align: left; padding: 10px 12px; border-radius: 6px; border: 1px solid #8a8886; background: transparent; color: inherit; cursor: pointer; }
+      button:hover, button:focus-visible { border-color: #0f6cbd; outline: none; box-shadow: 0 0 0 1px #0f6cbd; }
+      button[aria-pressed="true"] { border-color: #0f6cbd; box-shadow: 0 0 0 1px #0f6cbd; font-weight: 600; }
+      #status { margin-top: 12px; min-height: 20px; }
+      details { margin-top: 24px; font-size: 12px; }
+      input { font: inherit; width: 100%; box-sizing: border-box; margin: 6px 0; }
+    </style>
+  </head>
+  <body>
+    <h1>Signature</h1>
+    <p id="intro">Your organisation manages your signature. Pick an alternative for this message if you need one.</p>
+    <div class="options" id="options" role="group" aria-label="Available signatures"></div>
+    <div id="status" role="status" aria-live="polite"></div>
+    <details id="dev" hidden>
+      <summary>Developer sign-in</summary>
+      Paste a token from <code>POST /api/dev/login</code> (development builds only).
+      <input id="devToken" aria-label="Development token" />
+      <button id="saveDev" type="button">Save token</button>
+    </details>
+    <script src="taskpane.js"></script>
+  </body>
+</html>

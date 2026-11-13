@@ -1,0 +1,55 @@
+# PostgreSQL + Redis + API/portal + SMTP processor + worker.
+#
+#   docker compose up --build -d
+#   docker compose logs api        # shows the one-time setup code on first start
+#
+# There is nothing to fill in here and no .env file. Open the portal, create the first owner account with the setup
+# code, and configure everything else (public address, Microsoft Entra app, mail routing, TLS certificate, alert mail)
+# under System. The values below only wire the containers to each other; PostgreSQL and Redis are not published
+# outside this compose network, which is why a fixed internal database password is acceptable.
+x-app-env: &app-env
+  Sig2Email__DatabaseProvider: postgres
+  Sig2Email__ConnectionString: Host=postgres;Database=sig2email;Username=sig2email;Password=sig2email-internal
+  Sig2Email__Redis: redis:6379
+  Sig2Email__DataDir: /data
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: sig2email
+      POSTGRES_USER: sig2email
+      POSTGRES_PASSWORD: sig2email-internal
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sig2email"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]   # cache only, nothing persisted
+
+  api:
+    build: { context: ., dockerfile: deploy/Dockerfile, target: api }
+    environment: *app-env
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_started } }
+    ports: ["8080:8080"]            # put a TLS-terminating reverse proxy in front
+    volumes: [appdata:/data]        # holds installation.key - back it up together with the database
+
+  smtp:
+    build: { context: ., dockerfile: deploy/Dockerfile, target: smtp }
+    environment: *app-env
+    depends_on: [api]
+    ports: ["25:2525"]
+    volumes: [appdata:/data]
+
+  worker:
+    build: { context: ., dockerfile: deploy/Dockerfile, target: worker }
+    environment: *app-env
+    depends_on: [api]
+    volumes: [appdata:/data]
+
+volumes:
+  pgdata:
+  appdata:
