@@ -1,6 +1,9 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net.Security;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using MailKit;
 using MailKit.Net.Smtp;
 using MailKit.Security;
@@ -20,6 +23,8 @@ public sealed class RelayClient(SettingsProvider settings, ILogger<RelayClient> 
     private const int MaxPooledConnectionsPerHost = 50;
     private readonly ConcurrentDictionary<string, ConcurrentBag<(SmtpClient Client, long LastUsed)>> _pools = new();
     public X509Certificate2? ClientCertificate { get; set; }
+    /// <summary>Intermediate certificates to present with <see cref="ClientCertificate"/>.</summary>
+    public X509Certificate2Collection? ClientCertificateChain { get; set; }
 
     public async Task SendAsync(string host, MimeMessage message, string mailFrom, IReadOnlyList<string> recipients, CancellationToken ct)
     {
@@ -69,10 +74,11 @@ public sealed class RelayClient(SettingsProvider settings, ILogger<RelayClient> 
 
     private async Task<SmtpClient> ConnectAsync(string host, SystemSettings o, CancellationToken ct)
     {
-        var client = new SmtpClient { Timeout = 60_000 };
+        var client = new IdentifiedSmtpClient(Identity()) { Timeout = 60_000 };
         try
         {
-            if (ClientCertificate != null) client.ClientCertificates = new X509CertificateCollection { ClientCertificate };
+            // Exchange Online records this name; left alone it would be the machine (container) name.
+            if (!string.IsNullOrWhiteSpace(o.SmtpHostName)) client.LocalDomain = o.SmtpHostName.Trim();
             if (!o.RelayRequireTls) client.ServerCertificateValidationCallback = (_, _, _, _) => true;
             await client.ConnectAsync(host, o.RelayPort, o.RelayRequireTls ? SecureSocketOptions.StartTls : SecureSocketOptions.StartTlsWhenAvailable, ct);
             return client;
@@ -81,6 +87,35 @@ public sealed class RelayClient(SettingsProvider settings, ILogger<RelayClient> 
         {
             client.Dispose();
             throw;
+        }
+    }
+
+    private (X509Certificate2 Leaf, SslStreamCertificateContext Context)? _identity;
+
+    /// <summary>Our certificate packaged with its intermediates, rebuilt only when the certificate is replaced.</summary>
+    private SslStreamCertificateContext? Identity()
+    {
+        var leaf = ClientCertificate;
+        if (leaf == null) return null;
+        var current = _identity;
+        if (current != null && ReferenceEquals(current.Value.Leaf, leaf)) return current.Value.Context;
+        var context = SslStreamCertificateContext.Create(leaf, ClientCertificateChain, offline: true);
+        _identity = (leaf, context);
+        return context;
+    }
+
+    /// <summary>
+    /// Presents the given certificate chain as-is. The default behaviour picks from a certificate list, which can skip
+    /// the certificate when the server names acceptable issuers and sends the leaf without its intermediates; Exchange
+    /// Online then cannot tie the connection to the tenant's inbound connector.
+    /// </summary>
+    private sealed class IdentifiedSmtpClient(SslStreamCertificateContext? identity) : SmtpClient
+    {
+        protected override SslClientAuthenticationOptions GetSslClientAuthenticationOptions(string host, RemoteCertificateValidationCallback remoteCertificateValidationCallback)
+        {
+            var options = base.GetSslClientAuthenticationOptions(host, remoteCertificateValidationCallback);
+            if (identity != null) options.ClientCertificateContext = identity;
+            return options;
         }
     }
 
@@ -98,6 +133,52 @@ public sealed class RelayClient(SettingsProvider settings, ILogger<RelayClient> 
 }
 
 /// <summary>
+/// Remembers for an hour which message/recipient pairs were handed back, so a message that returns without the
+/// loop-prevention header is still recognised. Holds keyed hashes only, in memory: the key dies with the process,
+/// and neither Message-IDs nor addresses can be read back from it.
+/// </summary>
+public sealed class RecentlyRelayed
+{
+    private const int MaxEntries = 500_000;
+    private static readonly long LifetimeMs = (long)TimeSpan.FromHours(1).TotalMilliseconds;
+    private static readonly long SweepEveryMs = (long)TimeSpan.FromMinutes(5).TotalMilliseconds;
+    private readonly byte[] _key = RandomNumberGenerator.GetBytes(32);
+    private readonly ConcurrentDictionary<Guid, long> _seen = new();
+    private long _sweptAt = Environment.TickCount64;
+
+    /// <summary>True when every one of these recipients was already sent this message.</summary>
+    public bool ContainsAll(string? messageId, IReadOnlyList<string> recipients)
+    {
+        if (string.IsNullOrEmpty(messageId) || recipients.Count == 0) return false;
+        var now = Environment.TickCount64;
+        foreach (var r in recipients)
+            if (!_seen.TryGetValue(Hash(messageId, r), out var at) || now - at > LifetimeMs) return false;
+        return true;
+    }
+
+    public void Add(string? messageId, IReadOnlyList<string> recipients)
+    {
+        if (string.IsNullOrEmpty(messageId)) return;
+        var now = Environment.TickCount64;
+        foreach (var r in recipients) _seen[Hash(messageId, r)] = now;
+
+        var swept = Interlocked.Read(ref _sweptAt);
+        if ((now - swept > SweepEveryMs || _seen.Count > MaxEntries) && Interlocked.CompareExchange(ref _sweptAt, now, swept) == swept)
+        {
+            foreach (var entry in _seen)
+                if (now - entry.Value > LifetimeMs) _seen.TryRemove(entry);
+            if (_seen.Count > MaxEntries) _seen.Clear(); // a flood: forgetting is safe, the header remains the first defence
+        }
+    }
+
+    private Guid Hash(string messageId, string recipient)
+    {
+        var hash = HMACSHA256.HashData(_key, Encoding.UTF8.GetBytes(messageId + "\n" + recipient.ToLowerInvariant()));
+        return new Guid(hash.AsSpan(0, 16));
+    }
+}
+
+/// <summary>
 /// Receives a message from Exchange Online, stamps the signatures its rules call for and hands it straight back.
 /// Fail-open: any error while stamping relays the original message unchanged. Message content is never written
 /// to disk or logged.
@@ -107,6 +188,7 @@ public sealed class MailPipeline(
     SettingsProvider settings, RuntimeEnvironment environment, ILogger<MailPipeline> log) : IMessageHandler
 {
     private const string TenantHeader = "X-MS-Exchange-CrossTenant-Id";
+    private readonly RecentlyRelayed _relayed = new();
 
     public long Processed;
     public long Stamped;
@@ -136,19 +218,28 @@ public sealed class MailPipeline(
 
         var stamped = false;
         var failed = false;
-        if (message.Headers[MimeStamper.ProcessedHeader] == null)
+        var marked = message.Headers[MimeStamper.ProcessedHeader] != null;
+        // Second line of defence against loops: the same message for the same recipients, back without the marker.
+        var returned = !marked && _relayed.ContainsAll(message.MessageId, envelope.Recipients);
+        if (returned)
+            log.LogWarning("A message for tenant {Tenant} came back without the {Header} header and was passed through without being stamped again; " +
+                "check that the Exchange transport rule still has its exception for that header", rt.Tenant.Id, MimeStamper.ProcessedHeader);
+        if (!marked)
         {
-            try
+            if (!returned)
             {
-                stamped = await StampAsync(message, rt, from, envelope, ct);
-            }
-            catch (Exception e) when (e is not OperationCanceledException)
-            {
-                // Fail open: deliver exactly what we received.
-                failed = true;
-                log.LogError("Stamping failed for tenant {Tenant}, relaying unmodified: {Type}: {Message}", rt.Tenant.Id, e.GetType().Name, e.Message);
-                data.Position = 0;
-                message = await MimeMessage.LoadAsync(data, ct);
+                try
+                {
+                    stamped = await StampAsync(message, rt, from, envelope, ct);
+                }
+                catch (Exception e) when (e is not OperationCanceledException)
+                {
+                    // Fail open: deliver exactly what we received.
+                    failed = true;
+                    log.LogError("Stamping failed for tenant {Tenant}, relaying unmodified: {Type}: {Message}", rt.Tenant.Id, e.GetType().Name, e.Message);
+                    data.Position = 0;
+                    message = await MimeMessage.LoadAsync(data, ct);
+                }
             }
             message.Headers.Add(MimeStamper.ProcessedHeader, "true");
         }
@@ -156,6 +247,7 @@ public sealed class MailPipeline(
         try
         {
             await relay.SendAsync(relayHost, message, envelope.MailFrom, envelope.Recipients, ct);
+            if (!marked) _relayed.Add(message.MessageId, envelope.Recipients);
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {

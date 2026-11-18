@@ -32,6 +32,8 @@ COPY --from=portal /web/dist ./wwwroot
 COPY --from=addin /addin/dist ./addin
 ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080
+# A named volume mounted here takes this ownership on first use, so the non-root user can write installation.key.
+RUN mkdir -p /data && chown $APP_UID /data
 USER $APP_UID
 ENTRYPOINT ["dotnet", "Sig2Email.Api.dll"]
 
@@ -41,11 +43,15 @@ COPY --from=build /out/smtp ./
 ENV ASPNETCORE_URLS=http://+:8081 Smtp__Port=2525
 # 2525 inside the container (non-root); publish it as port 25.
 EXPOSE 2525 8081
+# A named volume mounted here takes this ownership on first use, so the non-root user can write installation.key.
+RUN mkdir -p /data && chown $APP_UID /data
 USER $APP_UID
 ENTRYPOINT ["dotnet", "Sig2Email.MailProcessor.dll"]
 
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS worker
 WORKDIR /app
 COPY --from=build /out/worker ./
+# A named volume mounted here takes this ownership on first use, so the non-root user can write installation.key.
+RUN mkdir -p /data && chown $APP_UID /data
 USER $APP_UID
 ENTRYPOINT ["dotnet", "Sig2Email.Worker.dll"]

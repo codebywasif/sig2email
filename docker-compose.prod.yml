@@ -1,0 +1,17 @@
+# Production overrides for this server (37.187.141.17). Used together with docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+# The API is bound to 127.0.0.1 only (Docker-published ports bypass ufw, and nginx is its public entry point).
+# SMTP is published on port 25 for Exchange Online; the receiver itself insists on TLS and a Microsoft client certificate.
+services:
+  postgres:
+    restart: unless-stopped
+  redis:
+    restart: unless-stopped
+  api:
+    restart: unless-stopped
+    ports: !override ["127.0.0.1:8490:8080"]   # nginx (sig2email.dgcars.cloud) proxies to this
+  smtp:
+    restart: unless-stopped
+    ports: !override ["25:2525"]               # public: Exchange Online delivers here. Docker publishes past ufw.
+  worker:
+    restart: unless-stopped

@@ -5,6 +5,10 @@ using Sig2Email.Api;
 using Sig2Email.Api.Endpoints;
 using Sig2Email.Data;
 
+// One-off command for certificate-renewal hooks; everything else starts the portal/API.
+if (args.Length > 0 && args[0] == CertificateInstaller.Command)
+    return await CertificateInstaller.RunAsync(Console.OpenStandardInput(), Console.Out, Console.Error);
+
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSig2EmailData(builder.Configuration, builder.Environment);
 builder.Services.AddSig2EmailAuth();
@@ -68,5 +72,6 @@ app.MapPublicEndpoints();
 if (File.Exists(Path.Combine(app.Environment.WebRootPath ?? "wwwroot", "index.html"))) app.MapFallbackToFile("index.html");
 
 app.Run();
+return 0;
 
 public partial class Program;

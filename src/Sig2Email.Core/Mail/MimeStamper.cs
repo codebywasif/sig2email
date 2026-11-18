@@ -125,6 +125,10 @@ public static partial class MimeStamper
                 (p.Placement == SignaturePlacement.AboveQuotedText ? above : bottom).Append("\r\n").Append(p.Text.Replace("\r\n", "\n").Replace("\n", "\r\n")).Append("\r\n");
             SetText(plain, InsertText(plain.Text, above.ToString(), bottom.ToString()));
         }
+
+        // Any DKIM signature already on the message covers the old body and can no longer verify; a broken one
+        // counts against the sender at the receiving end. Exchange Online signs again when the message leaves.
+        m.Headers.RemoveAll(HeaderId.DkimSignature);
         return true;
     }
 

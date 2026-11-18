@@ -276,6 +276,28 @@ public class MimeStamperTests
     }
 
     [Fact]
+    public void Stamping_removes_dkim_signatures_that_no_longer_match_the_body()
+    {
+        const string dkim = "v=1; a=rsa-sha256; c=relaxed/relaxed; d=contoso.example; s=selector1; h=From:Date:Subject; bh=abc=; b=def=";
+        var m = Message("<html><body><p>Hello</p></body></html>", "Hello");
+        m.Headers.Add(HeaderId.DkimSignature, dkim);
+        m.Headers.Add(HeaderId.DkimSignature, dkim);
+        m.Headers.Add("ARC-Seal", "i=1; a=rsa-sha256; cv=none; d=microsoft.com");
+        m = Roundtrip(m);
+
+        Assert.True(MimeStamper.Apply(m, new[] { Sig() }));
+        m = Roundtrip(m);
+        Assert.DoesNotContain(m.Headers, h => h.Id == HeaderId.DkimSignature);
+        Assert.Contains(m.Headers, h => h.Field == "ARC-Seal");
+
+        // A message that is not modified keeps its signature, which is still valid.
+        var untouched = Message("<p>x</p>", "x");
+        untouched.Headers.Add(HeaderId.DkimSignature, dkim);
+        Assert.False(MimeStamper.Apply(untouched, Array.Empty<SignaturePart>()));
+        Assert.Contains(untouched.Headers, h => h.Id == HeaderId.DkimSignature);
+    }
+
+    [Fact]
     public void Html_only_and_text_only_messages()
     {
         var htmlOnly = new MimeMessage { Body = new TextPart("html") { Text = "<p>x</p>" } };

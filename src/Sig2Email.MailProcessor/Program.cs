@@ -65,6 +65,7 @@ public sealed class SmtpSettingsApplier(SettingsProvider settings, IOptions<Smtp
                     log.LogInformation("TLS certificate in use: {Subject}, valid until {NotAfter:yyyy-MM-dd}", leaf.Subject, leaf.NotAfter);
                 }
                 // The same certificate identifies us to Exchange Online's inbound connector when handing mail back.
+                relay.ClientCertificateChain = o.CertificateChain;
                 relay.ClientCertificate = o.Certificate;
                 _pfx = pfx;
             }

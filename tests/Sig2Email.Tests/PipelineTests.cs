@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -209,6 +211,27 @@ public class PipelineTests(PipelineFixture fx) : IClassFixture<PipelineFixture>
     }
 
     [Fact]
+    public async Task A_message_that_comes_back_without_the_loop_header_is_not_stamped_twice()
+    {
+        var (_, first, raw) = await fx.SendAsync(PipelineFixture.Compose(Sam, "customer@fabrikam.example", "Proposal", "<html><body><p>Hi</p></body></html>"));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(first.HtmlBody, "Sales Director"));
+
+        // Exchange hands the stamped message back, but the marker was lost on the way.
+        var back = MimeMessage.Load(new MemoryStream(raw));
+        back.Headers.RemoveAll(MimeStamper.ProcessedHeader);
+        back.Headers.RemoveAll("X-Test-Marker");
+        var (_, again, _) = await fx.SendAsync(back);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(again.HtmlBody, "Sales Director"));
+        Assert.Equal("true", again.Headers[MimeStamper.ProcessedHeader]);
+
+        // The same message for somebody else (Exchange splits messages per recipient) is new work and is stamped.
+        var copy = PipelineFixture.Compose(Sam, "other@fabrikam.example", "Proposal", "<html><body><p>Hi</p></body></html>",
+            tweak: x => x.MessageId = first.MessageId);
+        var (_, other, _) = await fx.SendAsync(copy);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(other.HtmlBody, "Sales Director"));
+    }
+
+    [Fact]
     public async Task Unregistered_organisations_are_refused_so_the_service_is_not_an_open_relay()
     {
         using var client = new SmtpClient();
@@ -415,5 +438,149 @@ public class SmtpTlsTests
             Assert.Empty(sink.Received);
         }
         finally { stop.Cancel(); File.Delete(pfx); }
+    }
+}
+
+/// <summary>How the relay introduces itself to Exchange Online, which matches its inbound connector on exactly these things.</summary>
+public class RelayIdentityTests
+{
+    private static X509Certificate2 Issue(string cn, X509Certificate2? issuer, bool ca)
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest($"CN={cn}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        req.CertificateExtensions.Add(new X509BasicConstraintsExtension(ca, false, 0, true));
+        if (!ca)
+        {
+            var san = new SubjectAlternativeNameBuilder();
+            san.AddDnsName(cn);
+            req.CertificateExtensions.Add(san.Build());
+        }
+        var from = DateTimeOffset.UtcNow.AddDays(-1);
+        var to = issuer == null ? DateTimeOffset.UtcNow.AddDays(30) : new DateTimeOffset(issuer.NotAfter.ToUniversalTime()).AddMinutes(-1);
+        using var cert = issuer == null
+            ? req.CreateSelfSigned(from, to)
+            : req.Create(issuer, from, to, RandomNumberGenerator.GetBytes(8)).CopyWithPrivateKey(rsa);
+        return new X509Certificate2(cert.Export(X509ContentType.Pfx, "pw"), "pw", X509KeyStorageFlags.Exportable);
+    }
+
+    [Fact]
+    public async Task Relay_introduces_itself_by_name_and_presents_its_certificate_with_intermediates()
+    {
+        using var root = Issue("S2E Test Root", null, true);
+        using var intermediate = Issue("S2E Test Intermediate", root, true);
+        using var leaf = Issue("smtp.sig2email.test", intermediate, false);
+        using var exchange = Issue("localhost", null, false);
+
+        var fx = new PipelineFixture();
+        await fx.InitializeAsync();
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            await fx.Services.GetRequiredService<SettingsProvider>().UpdateAsync(s =>
+            {
+                s.SmtpHostName = "smtp.sig2email.test";
+                s.RelayPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+            });
+
+            var greetings = new List<string>();
+            string? presented = null;
+            var alsoSent = new List<string>();
+            var exchangeSide = Task.Run(async () =>
+            {
+                using var tcp = await listener.AcceptTcpClientAsync();
+                Stream s = tcp.GetStream();
+                Task Say(string line) => s.WriteAsync(Encoding.ASCII.GetBytes(line + "\r\n")).AsTask();
+                async Task<string> Hear()
+                {
+                    var sb = new StringBuilder();
+                    var one = new byte[1];
+                    while (await s.ReadAsync(one) == 1 && one[0] != (byte)'\n') sb.Append((char)one[0]);
+                    return sb.ToString().TrimEnd('\r');
+                }
+                await Say("220 fake.mail.protection.outlook.com ESMTP");
+                greetings.Add(await Hear());
+                await Say("250-fake.mail.protection.outlook.com");
+                await Say("250 STARTTLS");
+                await Hear();
+                await Say("220 2.0.0 SMTP server ready");
+                var ssl = new SslStream(s);
+                await ssl.AuthenticateAsServerAsync(new SslServerAuthenticationOptions
+                {
+                    ServerCertificate = exchange,
+                    ClientCertificateRequired = true,
+                    RemoteCertificateValidationCallback = (_, cert, chain, _) =>
+                    {
+                        if (cert != null)
+                        {
+                            presented = new X509Certificate2(cert).GetNameInfo(X509NameType.SimpleName, false);
+                            alsoSent.AddRange(chain!.ChainPolicy.ExtraStore.Select(c => c.GetNameInfo(X509NameType.SimpleName, false)));
+                        }
+                        return true;
+                    },
+                });
+                s = ssl;
+                greetings.Add(await Hear());
+                await Say("250 fake.mail.protection.outlook.com");
+                await Hear();
+                await Say("421 4.3.2 test over");
+            });
+
+            var relay = fx.Services.GetRequiredService<RelayClient>();
+            relay.ClientCertificate = leaf;
+            relay.ClientCertificateChain = new X509Certificate2Collection { intermediate };
+            var mail = PipelineFixture.Compose("a@contoso.example", "b@fabrikam.example", "identity", "<p>x</p>");
+            await Assert.ThrowsAnyAsync<Exception>(() => relay.SendAsync("ignored.example", mail, "a@contoso.example", new[] { "b@fabrikam.example" }, default));
+            await exchangeSide.WaitAsync(TimeSpan.FromSeconds(20));
+
+            Assert.Equal(new[] { "EHLO smtp.sig2email.test", "EHLO smtp.sig2email.test" }, greetings);
+            Assert.Equal("smtp.sig2email.test", presented);
+            Assert.Contains("S2E Test Intermediate", alsoSent);
+        }
+        finally
+        {
+            listener.Stop();
+            await fx.DisposeAsync();
+        }
+    }
+}
+
+public class CertificateInstallerTests
+{
+    private static byte[] Pfx(string cn, DateTimeOffset notAfter)
+    {
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest($"CN={cn}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var cert = req.CreateSelfSigned(notAfter.AddDays(-30), notAfter);
+        return cert.Export(X509ContentType.Pfx);
+    }
+
+    [Fact]
+    public async Task A_renewed_certificate_piped_in_replaces_the_stored_one_and_bad_input_changes_nothing()
+    {
+        var fx = new PipelineFixture();
+        await fx.InitializeAsync();
+        try
+        {
+            var settings = fx.Services.GetRequiredService<SettingsProvider>();
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var renewed = Pfx("smtp.sig2email.test", DateTimeOffset.UtcNow.AddDays(60));
+            Assert.Equal(0, await Sig2Email.Api.CertificateInstaller.InstallAsync(settings, renewed, output, error));
+            Assert.Contains("smtp.sig2email.test", output.ToString());
+            Assert.Equal(Convert.ToBase64String(renewed), settings.Current.SmtpCertificatePfx);
+            var (leaf, _) = Sig2Email.Data.Pfx.Load(Convert.FromBase64String(settings.Current.SmtpCertificatePfx!), settings.Current.SmtpCertificatePassword);
+            Assert.True(leaf.HasPrivateKey);
+
+            Assert.Equal(1, await Sig2Email.Api.CertificateInstaller.InstallAsync(settings, Pfx("old.test", DateTimeOffset.UtcNow.AddDays(-1)), output, error));
+            Assert.Equal(1, await Sig2Email.Api.CertificateInstaller.InstallAsync(settings, new byte[] { 1, 2, 3 }, output, error));
+            Assert.Equal(2, await Sig2Email.Api.CertificateInstaller.InstallAsync(settings, Array.Empty<byte>(), output, error));
+            Assert.Equal(Convert.ToBase64String(renewed), settings.Current.SmtpCertificatePfx);
+        }
+        finally
+        {
+            await fx.DisposeAsync();
+        }
     }
 }
