@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SIZE = 96; // displayed at 16–48 px, so this stays crisp on high-DPI screens
+const DEFAULT_SIZE = 96; // displayed at 16–48 px, so this stays crisp on high-DPI screens
 const SS = 3;    // supersampling factor for anti-aliasing
 const out = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'Sig2Email.Api', 'wwwroot', 'icons');
 
@@ -23,6 +23,13 @@ const ICONS = {
   x: { color: [17, 17, 17], draw: (p) => text(p, 'X', 0.5, 0.5, 0.09) },
   facebook: { color: [24, 119, 242], draw: (p) => text(p, 'f', 0.5, 0.5, 0.095) },
   web: { color: [15, 108, 189], draw: (p) => text(p, 'www', 0.5, 0.5, 0.05) },
+  // Outlook add-in icon: a short "name" line, two text lines and a signature stroke
+  addin: {
+    color: [15, 108, 189],
+    sizes: [16, 32, 64, 80, 128], // 64 = IconUrl, 128 = HighResolutionIconUrl, 16/32/80 = ribbon button
+    draw: (p) => roundRect(p, 0.2, 0.22, 0.36, 0.1, 0.05) || roundRect(p, 0.2, 0.42, 0.6, 0.07, 0.035) ||
+                 roundRect(p, 0.2, 0.56, 0.6, 0.07, 0.035) || roundRect(p, 0.2, 0.72, 0.42, 0.07, 0.035),
+  },
   // camera outline: rounded square ring, lens ring, flash dot
   instagram: {
     color: [214, 41, 118],
@@ -49,7 +56,7 @@ function roundRect([x, y], left, top, w, h, r) {
 }
 const roundRectRing = (p, l, t, w, h, r, s) => roundRect(p, l, t, w, h, r) && !roundRect(p, l + s, t + s, w - 2 * s, h - 2 * s, Math.max(r - s, 0.01));
 
-function render({ color, draw }) {
+function render({ color, draw }, SIZE = DEFAULT_SIZE) {
   const px = Buffer.alloc(SIZE * SIZE * 4);
   for (let y = 0; y < SIZE; y++) {
     for (let x = 0; x < SIZE; x++) {
@@ -65,10 +72,10 @@ function render({ color, draw }) {
       px[i + 3] = Math.round((255 * tile) / n);
     }
   }
-  return png(px);
+  return png(px, SIZE);
 }
 
-function png(rgba) {
+function png(rgba, SIZE) {
   const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
   const crc = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
   const chunk = (type, data) => {
@@ -86,6 +93,9 @@ function png(rgba) {
 
 mkdirSync(out, { recursive: true });
 for (const [name, icon] of Object.entries(ICONS)) {
-  writeFileSync(join(out, `${name}.png`), render(icon));
-  console.log(`wrote ${name}.png`);
+  for (const size of icon.sizes ?? [null]) {
+    const file = size ? `${name}-${size}.png` : `${name}.png`;
+    writeFileSync(join(out, file), size ? render(icon, size) : render(icon));
+    console.log(`wrote ${file}`);
+  }
 }

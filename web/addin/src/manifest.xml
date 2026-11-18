@@ -8,11 +8,10 @@
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Sig2Email Signatures" />
   <Description DefaultValue="Adds the managed email signature of your organisation while you write." />
-  <IconUrl DefaultValue="{{API_URL}}/icons/web.png" />
-  <HighResolutionIconUrl DefaultValue="{{API_URL}}/icons/web.png" />
+  <IconUrl DefaultValue="{{API_URL}}/icons/addin-64.png" />
+  <HighResolutionIconUrl DefaultValue="{{API_URL}}/icons/addin-128.png" />
   <SupportUrl DefaultValue="{{ADDIN_URL}}/taskpane.html" />
   <AppDomains>
-    <AppDomain>{{ADDIN_URL}}</AppDomain>
     <AppDomain>{{API_URL}}</AppDomain>
   </AppDomains>
   <Hosts><Host Name="Mailbox" /></Hosts>
@@ -45,7 +44,7 @@
                     <Label resid="Button.Label" />
                     <Supertip><Title resid="Button.Label" /><Description resid="Button.Tip" /></Supertip>
                     <Icon>
-                      <bt:Image size="16" resid="Icon" /><bt:Image size="32" resid="Icon" /><bt:Image size="80" resid="Icon" />
+                      <bt:Image size="16" resid="Icon.16" /><bt:Image size="32" resid="Icon.32" /><bt:Image size="80" resid="Icon.80" />
                     </Icon>
                     <Action xsi:type="ShowTaskpane"><SourceLocation resid="Taskpane.Url" /></Action>
                   </Control>
@@ -64,7 +63,11 @@
         </Host>
       </Hosts>
       <Resources>
-        <bt:Images><bt:Image id="Icon" DefaultValue="{{API_URL}}/icons/web.png" /></bt:Images>
+        <bt:Images>
+          <bt:Image id="Icon.16" DefaultValue="{{API_URL}}/icons/addin-16.png" />
+          <bt:Image id="Icon.32" DefaultValue="{{API_URL}}/icons/addin-32.png" />
+          <bt:Image id="Icon.80" DefaultValue="{{API_URL}}/icons/addin-80.png" />
+        </bt:Images>
         <bt:Urls>
           <bt:Url id="Runtime.Url" DefaultValue="{{ADDIN_URL}}/launchevent.html" />
           <bt:Url id="Runtime.Js" DefaultValue="{{ADDIN_URL}}/launchevent.js" />
@@ -78,12 +81,8 @@
           <bt:String id="Button.Tip" DefaultValue="Choose a different approved signature for this message." />
         </bt:LongStrings>
       </Resources>
-      <!-- Fallback single sign-on for clients without nested app authentication. -->
-      <WebApplicationInfo>
-        <Id>{{CLIENT_ID}}</Id>
-        <Resource>api://{{CLIENT_ID}}</Resource>
-        <Scopes><Scope>access_as_user</Scope></Scopes>
-      </WebApplicationInfo>
+      <!-- No WebApplicationInfo: sign-in uses nested app authentication (see core.ts). Legacy Office SSO would need the
+           Application ID URI in the form api://<host>/<client id>, which this service does not use. -->
     </VersionOverrides>
   </VersionOverrides>
 </OfficeApp>

@@ -46,7 +46,8 @@ export async function getToken(interactive = false): Promise<string | null> {
       return (await app.acquireTokenPopup({ scopes: SCOPES })).accessToken;
     }
   } catch {
-    // Older clients without NAA: legacy Office SSO (needs WebApplicationInfo in the manifest).
+    // Legacy Office SSO. Only succeeds if the manifest carries a WebApplicationInfo section, which the shipped one
+    // does not; without it this fails quietly and the add-in reports "not signed in".
     try {
       return await Office.auth.getAccessToken({ allowSignInPrompt: interactive, allowConsentPrompt: interactive });
     } catch {
